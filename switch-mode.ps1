@@ -355,16 +355,35 @@ function Remember-Mac {
     $a = (arp -a $TV_IP 2>$null | Out-String)
     if ($a -match '((?:[0-9a-fA-F]{2}-){5}[0-9a-fA-F]{2})') { Set-Content -Path (Join-Path $here 'tv-mac.txt') -Value ($matches[1] -replace '-', ':') }
 }
+# Is the TV's ADB port answering? (quick check, so we never sit through a 20 second adb timeout)
+function Test-Tcp([int]$timeoutMs = 1500) {
+    $c = New-Object System.Net.Sockets.TcpClient
+    try {
+        $iar = $c.BeginConnect($TV_IP, $TV_PORT, $null, $null)
+        $ok = $iar.AsyncWaitHandle.WaitOne($timeoutMs, $false)
+        if ($ok) { try { $c.EndConnect($iar) } catch { $ok = $false } }
+        return $ok
+    } catch { return $false } finally { $c.Close() }
+}
 function Send-Wol {
     $f = Join-Path $here 'tv-mac.txt'
-    if (-not (Test-Path $f)) { Log 'wol: no saved MAC address yet'; return $false }
+    if (-not (Test-Path $f)) { Log 'wol: no saved MAC address yet (it is saved the first time the TV answers)'; return $false }
     $hex = (Get-Content $f -TotalCount 1).Trim() -split '[:-]'
     if ($hex.Count -ne 6) { return $false }
     $mac = [byte[]]($hex | ForEach-Object { [Convert]::ToByte($_, 16) })
     $pkt = [byte[]]((@(255) * 6) + (@($mac) * 16))
+    # to everyone, to the home network's broadcast address, and straight to the TV - some TVs only listen to one of them
+    $targets = @('255.255.255.255')
+    if ($TV_IP -match '^(\d+\.\d+\.\d+)\.\d+$') { $targets += ($matches[1] + '.255'); $targets += $TV_IP }
     $udp = New-Object System.Net.Sockets.UdpClient
-    try { $udp.EnableBroadcast = $true; [void]$udp.Send($pkt, $pkt.Length, '255.255.255.255', 9); [void]$udp.Send($pkt, $pkt.Length, '255.255.255.255', 7) } finally { $udp.Close() }
-    Log 'wol: magic packet sent'
+    try {
+        $udp.EnableBroadcast = $true
+        for ($i = 0; $i -lt 3; $i++) {
+            foreach ($t in $targets) { foreach ($port in 9, 7) { try { [void]$udp.Send($pkt, $pkt.Length, $t, $port) } catch {} } }
+            Start-Sleep -Milliseconds 200
+        }
+    } finally { $udp.Close() }
+    Log 'wol: magic packets sent'
     return $true
 }
 
@@ -372,11 +391,18 @@ function Do-TvAction([string]$action) {
     $script:Adb = Find-Adb
     if (-not $script:Adb) { Log 'tv: adb not found (install it, or put adb.exe next to this script)'; return }
     $script:Target = "${TV_IP}:$TV_PORT"
-    $ok = Tv-Connect
-    if ((-not $ok) -and ($action -eq 'wake')) {
-        if (Send-Wol) { Start-Sleep -Seconds 5; $ok = Tv-Connect }
+    $reach = Test-Tcp
+    if ((-not $reach) -and (($action -eq 'wake') -or ($action -eq 'show'))) {
+        Log 'tv: not answering - trying to wake it over the network'
+        if (Send-Wol) {
+            for ($i = 0; ($i -lt 14) -and (-not $reach); $i++) { Start-Sleep -Seconds 2; $reach = Test-Tcp }
+        }
     }
-    if (-not $ok) { Log "tv: could not reach $($script:Target) (TV off, or network debugging is off)"; return }
+    if (-not $reach) {
+        Log "tv: $($script:Target) is not answering. The TV is off or in deep standby; use the remote, or turn on Wake on Wi-Fi/LAN (or Instant Power On) in the TV's power settings."
+        return
+    }
+    if (-not (Tv-Connect)) { Log "tv: adb could not connect to $($script:Target) (is network debugging on?)"; return }
     Remember-Mac
     switch ($action) {
         'sleep' { [void](Adb-Shell 'input keyevent KEYCODE_SLEEP'); Log 'tv: sleep sent' }
@@ -392,7 +418,8 @@ function Do-TvAction([string]$action) {
                 else { Log 'tv: was already on its TV/HDMI screen, keeping the remembered app' }
             } else { Log "tv: could not read the foreground app: $top" }
             $uri = 'content://android.media.tv/passthrough/' + [uri]::EscapeDataString($TV_HDMI_INPUT)
-            [void](Adb-Shell "am start -a android.intent.action.VIEW -d $uri")
+            $o = Adb-Shell "am start -a android.intent.action.VIEW -d $uri"
+            if ($o -match 'Error|Exception') { Log "tv: switching input said: $o" }
             Log 'tv: switched to the PC input'
         }
         'leave' {
@@ -402,7 +429,23 @@ function Do-TvAction([string]$action) {
             $lastFile = Join-Path $here 'tv-last-app.txt'
             if (($RETURN_TO -eq 'previous') -and (Test-Path $lastFile)) {
                 $comp = (Get-Content $lastFile -TotalCount 1).Trim()
-                if ($comp) { [void](Adb-Shell "am start -n '$comp'"); Log "tv: back to $comp"; return }
+                if ($comp -match '^([\w\.]+)/') {
+                    $pkg = $matches[1]
+                    # open the app the way the TV's own launcher does (its front door), not one inner screen of it.
+                    # The inner screen we remembered (e.g. YouTube's MainActivity) often does nothing when opened cold.
+                    $bad = 'No activities found|monkey aborted|Error|Exception|does not exist'
+                    $o = Adb-Shell "monkey -p $pkg -c android.intent.category.LEANBACK_LAUNCHER 1"
+                    Log "tv: open $pkg (TV launcher entry) -> $(($o -split "`n" | Select-Object -First 3) -join ' | ')"
+                    if ($o -match $bad) {
+                        $o = Adb-Shell "monkey -p $pkg -c android.intent.category.LAUNCHER 1"
+                        Log "tv: open $pkg (phone launcher entry) -> $(($o -split "`n" | Select-Object -First 3) -join ' | ')"
+                    }
+                    if ($o -match $bad) {
+                        $o = Adb-Shell "am start -n '$comp'"
+                        Log "tv: open $comp -> $o"
+                    }
+                    return
+                }
             }
             [void](Adb-Shell 'input keyevent KEYCODE_HOME')
             Log 'tv: sent Home'
