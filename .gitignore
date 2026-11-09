@@ -1,0 +1,16 @@
+# runtime files the scripts create
+state.json
+targets.json
+snap.tmp
+switch-log.txt
+tv-log.txt
+tray-log.txt
+last-audio.txt
+tv-last-app.txt
+tv-mac.txt
+tv-probe-*.txt
+MultiMonitorTool.cfg
+# third-party tool, download it from NirSoft (see README)
+MultiMonitorTool.exe
+MultiMonitorTool.chm
+readme.txt

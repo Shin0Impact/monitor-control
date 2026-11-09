@@ -1,0 +1,17 @@
+{
+  "monitors": [
+    { "id": "SAM7312", "name": "S27C31x",      "role": "desktop", "width": 1920, "height": 1080 },
+    { "id": "AOC2702", "name": "Q27G2G3R3B",   "role": "desktop", "width": 2560, "height": 1440 },
+    { "id": "XXX8000", "name": "Smart TV Pro", "role": "tv",      "width": 3840, "height": 2160 }
+  ],
+  "main": "AOC2702",
+  "tv": {
+    "ip": "10.0.0.222",
+    "port": 5555,
+    "hdmiInput": "com.tcl.tvinput/.TvPassThroughService/HW15",
+    "audio": "Smart TV Pro",
+    "tvApp": "com.tcl.tv"
+  },
+  "returnTo": "home",
+  "hotkeys": true
+}
