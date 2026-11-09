@@ -47,6 +47,7 @@ On the TV, switch to the PC's HDMI input and run `tools\probe-tv.bat <tv-ip> hdm
 - `tray.ps1` - the tray app and Settings window
 - `switch-mode.ps1` - does the actual switching (`-Mode desk|tv|all|list|tvaction`)
 - `config.json` - your settings (written by the Settings window; safe to edit by hand)
+- `MonitorControl.exe` - double-click to start the tray app (no window). It is a small launcher and needs the other files next to it. Rebuild it with `tools\build-exe.bat` if you change `tools\launcher.cs`.
 - `*.vbs` - launchers that run without a console window
 - `tools/probe-tv.bat` - helper for finding the TV's input name
 

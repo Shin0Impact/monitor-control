@@ -119,7 +119,11 @@ $runName = 'DisplayModesTray'
 function Get-Startup { return [bool](Get-ItemProperty -Path $runKey -Name $runName -ErrorAction SilentlyContinue) }
 function Set-Startup([bool]$on) {
     try {
-        if ($on) { Set-ItemProperty -Path $runKey -Name $runName -Value ('wscript.exe "{0}"' -f (Join-Path $here 'tray.vbs')) }
+        if ($on) {
+            $exe = Join-Path $here 'MonitorControl.exe'
+            if (Test-Path $exe) { Set-ItemProperty -Path $runKey -Name $runName -Value ('"{0}"' -f $exe) }
+            else { Set-ItemProperty -Path $runKey -Name $runName -Value ('wscript.exe "{0}"' -f (Join-Path $here 'tray.vbs')) }
+        }
         else { Remove-ItemProperty -Path $runKey -Name $runName -ErrorAction SilentlyContinue }
     } catch { Log-Tray "startup setting failed: $_" }
 }
