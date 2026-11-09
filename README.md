@@ -56,6 +56,8 @@ Logs, for when something misbehaves: `switch-log.txt` (every screen switch with 
 
 - Screens are matched by their hardware model ID, so two identical monitors can't be told apart.
 - TV control is for Android TV over ADB. Other TVs would need a different command set.
+- **TV picture** (tray menu) switches the TV between 4K 60 Hz and 1080p 120 Hz; it is applied right away if the TV is on, otherwise next time.
+- All screens mode keeps the sound device you last used in desktop mode (it only moves it back from the TV's sound if the TV had taken over).
 - Waking a TV that is fully off by network works only if it keeps its network alive in standby. The app tries ADB, then Wake-on-LAN (needs the TV's MAC, saved the first time it answers). If `tv-log.txt` says the TV "is not answering", the TV is in deep standby: turn on Wake on Wi-Fi/LAN, Instant Power On or Quick Start in the TV's power/network settings, or wake it with the remote.
 - "Previous app" reopens the app that was in front before the PC input was shown; the result of each launch attempt is written to `tv-log.txt`.
 - 4K at 120 Hz needs an HDMI 2.1 path (a DisplayPort-to-HDMI adapter is usually limited to 4K 60 Hz).

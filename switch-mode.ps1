@@ -6,7 +6,7 @@
 #   -Mode list     : write targets.json (screens + sound devices Windows sees) for the Settings window
 #   -Mode tvaction : run one TV command in the background (-TvAction show | leave | sleep | wake)
 # Screens are switched in ONE Windows call (SetDisplayConfig); Windows re-uses the layout it remembers.
-param([ValidateSet('tv','desk','all','list','tvaction')][string]$Mode = 'list',
+param([ValidateSet('tv','desk','all','list','tvaction','layout')][string]$Mode = 'list',
       [ValidateSet('show','leave','sleep','wake','')][string]$TvAction = '')
 
 $here = $PSScriptRoot
@@ -483,6 +483,19 @@ function Write-Targets {
 
 $saveFile = Join-Path $here 'last-audio.txt'
 
+# Desktop and All modes use the sound device you last used on the desktop. If the TV's sound is the current
+# one, go back to the saved device; otherwise keep whatever is playing now and remember it for next time.
+function Use-DeskAudio {
+    if (-not $TV_AUDIO) { return }
+    $cur = [AudioSwitch]::GetDefaultId()
+    $curDev = Get-PlaybackDevices | Where-Object { $_.Id -eq $cur }
+    if ($cur -and $curDev -and ($curDev.Name -notlike "*$TV_AUDIO*")) { Set-Content -Path $saveFile -Value $cur; Log "audio: keeping $($curDev.Name)"; return }
+    if (Test-Path $saveFile) {
+        $id = (Get-Content $saveFile -TotalCount 1).Trim()
+        Set-AudioWithRetry { Get-PlaybackDevices | Where-Object { $_.Active -and $_.Id -eq $id } } 'saved device' 8
+    }
+}
+
 switch ($Mode) {
     'list'     { Write-Targets }
     'tvaction' { Do-TvAction $TvAction }
@@ -502,17 +515,20 @@ switch ($Mode) {
         if ($DESKTOP_IDS.Count -eq 0) { Log 'No desktop screens are set in Settings - nothing to do'; break }
         Switch-Displays $DESKTOP_IDS $TV_IDS
         if ($TV_IDS.Count -gt 0) { Tv-Async 'leave' }
-        if (Test-Path $saveFile) {
-            $id = (Get-Content $saveFile -TotalCount 1).Trim()
-            Set-AudioWithRetry { Get-PlaybackDevices | Where-Object { $_.Active -and $_.Id -eq $id } } 'saved device' 8
-        }
+        Use-DeskAudio
         Enforce-Layout $DESKTOP_IDS
     }
     'all' {
         if ($ORDER.Count -eq 0) { Log 'No screens are set in Settings - nothing to do'; break }
         Switch-Displays $ORDER @()
         if ($TV_IDS.Count -gt 0) { Tv-Async 'show' }
+        Use-DeskAudio
         Enforce-Layout $ORDER
+    }
+    'layout' {
+        # re-apply resolution / refresh / positions to whatever screens are on right now
+        $act = @(Get-ActiveScreens | ForEach-Object { $_.'Short Monitor ID' } | Where-Object { $ORDER -contains $_ })
+        if ($act.Count -gt 0) { Enforce-Layout $act } else { Log 'layout: no configured screens are on' }
     }
 }
 Log 'finished'

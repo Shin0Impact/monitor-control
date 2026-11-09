@@ -149,6 +149,15 @@ $miPrev.add_Click({ Set-ReturnTo 'previous' })
 [void]$miReturn.DropDownItems.Add($miPrev)
 [void]$menu.Items.Add($miReturn)
 
+$miPic = New-Object System.Windows.Forms.ToolStripMenuItem 'TV picture'
+$miPic4k  = New-Object System.Windows.Forms.ToolStripMenuItem '4K 60 Hz'
+$miPicHd  = New-Object System.Windows.Forms.ToolStripMenuItem '1080p 120 Hz'
+$miPic4k.add_Click({ Set-TvPicture 3840 2160 })
+$miPicHd.add_Click({ Set-TvPicture 1920 1080 })
+[void]$miPic.DropDownItems.Add($miPic4k)
+[void]$miPic.DropDownItems.Add($miPicHd)
+[void]$menu.Items.Add($miPic)
+
 $miSettings = Add-Item 'Settings...' { Show-Settings }
 $miStartup = Add-Item 'Start with Windows' { Set-Startup (-not (Get-Startup)); Update-Tray }
 [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
@@ -161,6 +170,30 @@ function Set-ReturnTo([string]$value) {
     $cfg | Add-Member -NotePropertyName returnTo -NotePropertyValue $value -Force
     Save-Config $cfg
     Update-Tray
+}
+
+# TV resolution: 4K runs at 60 Hz, 1080p at 120 Hz (the highest refresh the TV offers at that size is picked automatically)
+function Set-TvPicture([int]$w, [int]$h) {
+    try {
+        $cfg = Load-Config
+        if (-not $cfg) { return }
+        foreach ($m in @($cfg.monitors | Where-Object { $_.role -eq 'tv' })) {
+            $m | Add-Member -NotePropertyName width -NotePropertyValue $w -Force
+            $m | Add-Member -NotePropertyName height -NotePropertyValue $h -Force
+        }
+        Save-Config $cfg
+        Update-Tray
+        $mode = Get-Mode
+        $label = if ($h -ge 2160) { '4K 60 Hz' } else { '1080p 120 Hz' }
+        if (($mode -eq 'tv') -or ($mode -eq 'all')) {
+            if ($script:proc -and (-not $script:proc.HasExited)) { Show-Balloon 'Still switching, one moment...'; return }
+            $script:proc = Start-Process -FilePath powershell.exe -WindowStyle Hidden -PassThru -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$switchScript`"", '-Mode', 'layout')
+            Show-Balloon "TV: $label"
+        } else {
+            Show-Balloon "TV will use $label"
+        }
+        Log-Tray "tv picture: $label"
+    } catch { Log-Tray "Set-TvPicture failed: $_" }
 }
 
 function Update-Tray {
@@ -176,7 +209,12 @@ function Update-Tray {
     $miHome.Checked = (-not $isPrev)
     $miPrev.Checked = $isPrev
     $hasTv = ($cfg -and (@($cfg.monitors | Where-Object { $_.role -eq 'tv' }).Count -gt 0))
-    foreach ($it in @($miSleep, $miWake, $miReturn)) { $it.Enabled = [bool]$hasTv }
+    foreach ($it in @($miSleep, $miWake, $miReturn, $miPic)) { $it.Enabled = [bool]$hasTv }
+    $tvMon = $null
+    if ($cfg) { $tvMon = @($cfg.monitors | Where-Object { $_.role -eq 'tv' }) | Select-Object -First 1 }
+    $is4k = ($tvMon -and ([int]$tvMon.height -ge 2160))
+    $miPic4k.Checked = [bool]$is4k
+    $miPicHd.Checked = [bool]($tvMon -and (-not $is4k))
     $miStartup.Checked = (Get-Startup)
     $hk = ''
     if ($cfg -and $cfg.hotkeys) { $hk = '   Ctrl+Alt+' }
