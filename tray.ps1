@@ -17,10 +17,13 @@ function Log-Tray([string]$m) {
     } catch {}
 }
 
+# log anything that kills the app at startup
+trap { Log-Tray ('fatal: ' + $_ + ' (line ' + $_.InvocationInfo.ScriptLineNumber + ')'); break }
+
 # only one copy at a time
 $createdNew = $false
 $script:mutex = New-Object System.Threading.Mutex($true, 'Local\DisplayModesTray', [ref]$createdNew)
-if (-not $createdNew) { exit }
+if (-not $createdNew) { Log-Tray 'already running - exiting'; exit }
 
 # a hidden window that receives the global hotkeys
 Add-Type -ReferencedAssemblies System.Windows.Forms -TypeDefinition @'
