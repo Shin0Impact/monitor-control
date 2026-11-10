@@ -289,6 +289,65 @@ function Show-TrayMenu {
     } catch { Log-Tray "menu: $_" }
 }
 
+function Set-ReturnTo([string]$value) {
+    $cfg = Load-Config
+    if (-not $cfg) { return }
+    $cfg | Add-Member -NotePropertyName returnTo -NotePropertyValue $value -Force
+    Save-Config $cfg
+    Update-Tray
+}
+
+# TV resolution: 4K runs at 60 Hz, 1080p at 120 Hz (the highest refresh the TV offers at that size is picked automatically)
+function Set-TvPicture([int]$w, [int]$h) {
+    try {
+        $cfg = Load-Config
+        if (-not $cfg) { return }
+        foreach ($m in @($cfg.monitors | Where-Object { $_.role -eq 'tv' })) {
+            $m | Add-Member -NotePropertyName width -NotePropertyValue $w -Force
+            $m | Add-Member -NotePropertyName height -NotePropertyValue $h -Force
+        }
+        Save-Config $cfg
+        Update-Tray
+        $mode = Get-Mode
+        $label = if ($h -ge 2160) { '4K 60 Hz' } else { '1080p 120 Hz' }
+        if (($mode -eq 'tv') -or ($mode -eq 'all')) {
+            if ($script:proc -and (-not $script:proc.HasExited)) { Show-Balloon 'Still switching, one moment...'; return }
+            $script:proc = Start-Process -FilePath powershell.exe -WindowStyle Hidden -PassThru -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$switchScript`"", '-Mode', 'layout')
+            Show-Balloon "TV: $label"
+        } else {
+            Show-Balloon "TV will use $label"
+        }
+        Log-Tray "tv picture: $label"
+    } catch { Log-Tray "Set-TvPicture failed: $_" }
+}
+
+function Update-Tray {
+    $mode = Get-Mode
+    $old = $script:notify.Icon
+    $script:notify.Icon = New-ModeIcon $mode
+    $script:notify.Text = ('Display modes - ' + (Mode-Title $mode))
+    $miDesk.Checked = ($mode -eq 'desk')
+    $miTv.Checked = ($mode -eq 'tv')
+    $miAll.Checked = ($mode -eq 'all')
+    $cfg = Load-Config
+    $isPrev = ($cfg -and $cfg.returnTo -eq 'previous')
+    $miHome.Checked = (-not $isPrev)
+    $miPrev.Checked = $isPrev
+    $hasTv = ($cfg -and (@($cfg.monitors | Where-Object { $_.role -eq 'tv' }).Count -gt 0))
+    foreach ($it in @($miSleep, $miWake, $miReturn, $miPic)) { $it.Enabled = [bool]$hasTv }
+    $tvMon = $null
+    if ($cfg) { $tvMon = @($cfg.monitors | Where-Object { $_.role -eq 'tv' }) | Select-Object -First 1 }
+    $is4k = ($tvMon -and ([int]$tvMon.height -ge 2160))
+    $miPic4k.Checked = [bool]$is4k
+    $miPicHd.Checked = [bool]($tvMon -and (-not $is4k))
+    $miStartup.Checked = (Get-Startup)
+    $hk = ''
+    if ($cfg -and $cfg.hotkeys) { $hk = '   Ctrl+Alt+' }
+    $miDesk.Text = 'Desktop mode' + $(if ($hk) { "$($hk)D" } else { '' })
+    $miTv.Text   = 'TV mode' + $(if ($hk) { "$($hk)T" } else { '' })
+    $miAll.Text  = 'All screens on' + $(if ($hk) { "$($hk)A" } else { '' })
+}
+
 # left and right click both open the menu at the pointer
 $script:notify.add_MouseUp({
     param($sender, $e)
