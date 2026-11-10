@@ -137,22 +137,27 @@ using System.Windows.Forms;
 using System.Runtime.InteropServices;
 
 public static class MenuStyle {
-    [StructLayout(LayoutKind.Sequential)] struct MARGINS { public int l, r, t, b; }
+    [StructLayout(LayoutKind.Sequential)] struct AccentPolicy { public int AccentState; public int AccentFlags; public uint GradientColor; public int AnimationId; }
+    [StructLayout(LayoutKind.Sequential)] struct WinCompAttrData { public int Attribute; public IntPtr Data; public int SizeOfData; }
+    [DllImport("user32.dll")] static extern int SetWindowCompositionAttribute(IntPtr h, ref WinCompAttrData d);
     [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr h, int attr, ref int val, int size);
-    [DllImport("dwmapi.dll")] static extern int DwmExtendFrameIntoClientArea(IntPtr h, ref MARGINS m);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
-    // acrylic backdrop needs Windows 11 22H2 (build 22621) or newer; older versions get a plain dark menu
-    public static bool Acrylic = Environment.OSVersion.Version.Build >= 22621;
+    // acrylic blur behind (Windows 10 1803+); if it is refused the menu falls back to a plain dark one
+    public static bool Acrylic = Environment.OSVersion.Version.Build >= 17134;
+    const uint Tint = 0xC8202020;   // AABBGGRR: dark grey, ~78% opaque, so the blurred background shows through softly
     public static void Apply(IntPtr h) {
         try {
             int v = 1; DwmSetWindowAttribute(h, 20, ref v, 4);      // dark mode
             v = 2;     DwmSetWindowAttribute(h, 33, ref v, 4);      // rounded corners
-            if (Acrylic) {
-                v = 3; DwmSetWindowAttribute(h, 38, ref v, 4);      // acrylic ("transient window") backdrop
-                MARGINS m = new MARGINS(); m.l = -1; m.r = -1; m.t = -1; m.b = -1;
-                DwmExtendFrameIntoClientArea(h, ref m);             // black pixels then show the blurred backdrop
-            }
-        } catch { }
+            if (!Acrylic) return;
+            AccentPolicy ap = new AccentPolicy(); ap.AccentState = 4; ap.AccentFlags = 2; ap.GradientColor = Tint;
+            int size = Marshal.SizeOf(ap); IntPtr ptr = Marshal.AllocHGlobal(size);
+            try {
+                Marshal.StructureToPtr(ap, ptr, false);
+                WinCompAttrData d = new WinCompAttrData(); d.Attribute = 19; d.Data = ptr; d.SizeOfData = size;
+                if (SetWindowCompositionAttribute(h, ref d) == 0) Acrylic = false;
+            } finally { Marshal.FreeHGlobal(ptr); }
+        } catch { Acrylic = false; }
     }
 }
 
@@ -176,8 +181,14 @@ public class AcrylicRenderer : ToolStripProfessionalRenderer {
         using (Pen p = new Pen(Line)) e.Graphics.DrawLine(p, 10, y, e.Item.Width - 10, y);
     }
     protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e) {
-        e.TextColor = e.Item.Enabled ? Color.White : Color.FromArgb(120, 120, 120);
-        base.OnRenderItemText(e);
+        Graphics g = e.Graphics;
+        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+        Color c = e.Item.Enabled ? Color.White : Color.FromArgb(120, 120, 120);
+        using (StringFormat sf = new StringFormat(StringFormat.GenericTypographic)) {
+            sf.LineAlignment = StringAlignment.Center; sf.Alignment = StringAlignment.Near;
+            sf.FormatFlags |= StringFormatFlags.NoWrap; sf.HotkeyPrefix = System.Drawing.Text.HotkeyPrefix.None;
+            using (SolidBrush b = new SolidBrush(c)) g.DrawString(e.Text, e.TextFont, b, (RectangleF)e.TextRectangle, sf);
+        }
     }
     protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e) {
         e.ArrowColor = e.Item.Enabled ? Color.White : Color.FromArgb(120, 120, 120);
@@ -260,67 +271,19 @@ function Show-TrayMenu {
     try {
         $null = $menu.Handle
         [void][MenuStyle]::SetForegroundWindow($menu.Handle)
-        $menu.Show([System.Windows.Forms.Cursor]::Position)
+        $pt = [System.Windows.Forms.Cursor]::Position
+        $menu.Show($pt)
+        # left edge at the pointer; if the pointer is on the taskbar (or there is no room below), sit above it
+        $wa = [System.Windows.Forms.Screen]::FromPoint($pt).WorkingArea
+        $w = $menu.Width; $h = $menu.Height
+        $x = $pt.X; $y = $pt.Y
+        if ($y -ge $wa.Bottom) { $y = $wa.Bottom - $h - 8 }
+        elseif (($y + $h) -gt $wa.Bottom) { $y = $y - $h }
+        if (($x + $w) -gt $wa.Right) { $x = $wa.Right - $w - 8 }
+        if ($x -lt $wa.Left) { $x = $wa.Left }
+        if ($y -lt $wa.Top) { $y = $wa.Top }
+        $menu.Location = New-Object System.Drawing.Point($x, $y)
     } catch { Log-Tray "menu: $_" }
-}
-
-function Set-ReturnTo([string]$value) {
-    $cfg = Load-Config
-    if (-not $cfg) { return }
-    $cfg | Add-Member -NotePropertyName returnTo -NotePropertyValue $value -Force
-    Save-Config $cfg
-    Update-Tray
-}
-
-# TV resolution: 4K runs at 60 Hz, 1080p at 120 Hz (the highest refresh the TV offers at that size is picked automatically)
-function Set-TvPicture([int]$w, [int]$h) {
-    try {
-        $cfg = Load-Config
-        if (-not $cfg) { return }
-        foreach ($m in @($cfg.monitors | Where-Object { $_.role -eq 'tv' })) {
-            $m | Add-Member -NotePropertyName width -NotePropertyValue $w -Force
-            $m | Add-Member -NotePropertyName height -NotePropertyValue $h -Force
-        }
-        Save-Config $cfg
-        Update-Tray
-        $mode = Get-Mode
-        $label = if ($h -ge 2160) { '4K 60 Hz' } else { '1080p 120 Hz' }
-        if (($mode -eq 'tv') -or ($mode -eq 'all')) {
-            if ($script:proc -and (-not $script:proc.HasExited)) { Show-Balloon 'Still switching, one moment...'; return }
-            $script:proc = Start-Process -FilePath powershell.exe -WindowStyle Hidden -PassThru -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$switchScript`"", '-Mode', 'layout')
-            Show-Balloon "TV: $label"
-        } else {
-            Show-Balloon "TV will use $label"
-        }
-        Log-Tray "tv picture: $label"
-    } catch { Log-Tray "Set-TvPicture failed: $_" }
-}
-
-function Update-Tray {
-    $mode = Get-Mode
-    $old = $script:notify.Icon
-    $script:notify.Icon = New-ModeIcon $mode
-    $script:notify.Text = ('Display modes - ' + (Mode-Title $mode))
-    $miDesk.Checked = ($mode -eq 'desk')
-    $miTv.Checked = ($mode -eq 'tv')
-    $miAll.Checked = ($mode -eq 'all')
-    $cfg = Load-Config
-    $isPrev = ($cfg -and $cfg.returnTo -eq 'previous')
-    $miHome.Checked = (-not $isPrev)
-    $miPrev.Checked = $isPrev
-    $hasTv = ($cfg -and (@($cfg.monitors | Where-Object { $_.role -eq 'tv' }).Count -gt 0))
-    foreach ($it in @($miSleep, $miWake, $miReturn, $miPic)) { $it.Enabled = [bool]$hasTv }
-    $tvMon = $null
-    if ($cfg) { $tvMon = @($cfg.monitors | Where-Object { $_.role -eq 'tv' }) | Select-Object -First 1 }
-    $is4k = ($tvMon -and ([int]$tvMon.height -ge 2160))
-    $miPic4k.Checked = [bool]$is4k
-    $miPicHd.Checked = [bool]($tvMon -and (-not $is4k))
-    $miStartup.Checked = (Get-Startup)
-    $hk = ''
-    if ($cfg -and $cfg.hotkeys) { $hk = '   Ctrl+Alt+' }
-    $miDesk.Text = 'Desktop mode' + $(if ($hk) { "$($hk)D" } else { '' })
-    $miTv.Text   = 'TV mode' + $(if ($hk) { "$($hk)T" } else { '' })
-    $miAll.Text  = 'All screens on' + $(if ($hk) { "$($hk)A" } else { '' })
 }
 
 # left and right click both open the menu at the pointer
