@@ -2,6 +2,21 @@
 # Start it with tray.vbs (no window). Settings live in config.json (edited by the Settings window here).
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+# DPI aware (per monitor): menu text stays sharp and the screen capture behind the menu lines up with it.
+# This has to happen before any window is created.
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class DpiAware {
+    [DllImport("user32.dll")] static extern bool SetProcessDpiAwarenessContext(IntPtr ctx);
+    [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
+    public static void Enable() {
+        try { if (!SetProcessDpiAwarenessContext(new IntPtr(-4))) SetProcessDPIAware(); }
+        catch (Exception) { try { SetProcessDPIAware(); } catch (Exception) { } }
+    }
+}
+'@
+[DpiAware]::Enable()
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
 $here = $PSScriptRoot
@@ -258,6 +273,8 @@ public class FrostRenderer : ToolStripProfessionalRenderer {
 [MenuTheme]::Refresh()
 [System.Windows.Forms.ToolStripManager]::Renderer = New-Object FrostRenderer
 $script:menuFont = New-Object System.Drawing.Font('Segoe UI', 10)
+$script:uiScale = 1.0
+try { $g0 = [System.Drawing.Graphics]::FromHwnd([IntPtr]::Zero); $script:uiScale = $g0.DpiX / 96.0; $g0.Dispose() } catch {}
 
 # ---------------- menu ----------------
 $menu = New-Object System.Windows.Forms.ContextMenuStrip
@@ -304,7 +321,7 @@ function Style-Menu([System.Windows.Forms.ToolStripDropDown]$dd) {
     $dd.add_Opened({ param($s, $e) try { [MenuNative]::Round($s.Handle) } catch {} })
     foreach ($it in @($dd.Items)) {
         if ($it -is [System.Windows.Forms.ToolStripMenuItem]) {
-            $it.Padding = New-Object System.Windows.Forms.Padding(4, 5, 4, 5)
+            $it.Padding = New-Object System.Windows.Forms.Padding([int][Math]::Round(4 * $script:uiScale), [int][Math]::Round(5 * $script:uiScale), [int][Math]::Round(4 * $script:uiScale), [int][Math]::Round(5 * $script:uiScale))
             if ($it.HasDropDownItems) { Style-Menu $it.DropDown }
         }
     }
@@ -477,6 +494,8 @@ function Show-Settings {
     $script:settingsOpen = $true
     try {
         $form = New-Object System.Windows.Forms.Form
+        $form.AutoScaleDimensions = New-Object System.Drawing.SizeF(96, 96)
+        $form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::Dpi
         $script:ui.form = $form
         $form.Text = 'Display modes - Settings'
         $form.ClientSize = New-Object System.Drawing.Size(780, 600)
