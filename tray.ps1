@@ -128,6 +128,80 @@ function Set-Startup([bool]$on) {
     } catch { Log-Tray "startup setting failed: $_" }
 }
 
+# ---------------- Windows 11 style menu (dark, rounded, acrylic blur behind) ----------------
+Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing -TypeDefinition @'
+using System;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Windows.Forms;
+using System.Runtime.InteropServices;
+
+public static class MenuStyle {
+    [StructLayout(LayoutKind.Sequential)] struct MARGINS { public int l, r, t, b; }
+    [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr h, int attr, ref int val, int size);
+    [DllImport("dwmapi.dll")] static extern int DwmExtendFrameIntoClientArea(IntPtr h, ref MARGINS m);
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+    // acrylic backdrop needs Windows 11 22H2 (build 22621) or newer; older versions get a plain dark menu
+    public static bool Acrylic = Environment.OSVersion.Version.Build >= 22621;
+    public static void Apply(IntPtr h) {
+        try {
+            int v = 1; DwmSetWindowAttribute(h, 20, ref v, 4);      // dark mode
+            v = 2;     DwmSetWindowAttribute(h, 33, ref v, 4);      // rounded corners
+            if (Acrylic) {
+                v = 3; DwmSetWindowAttribute(h, 38, ref v, 4);      // acrylic ("transient window") backdrop
+                MARGINS m = new MARGINS(); m.l = -1; m.r = -1; m.t = -1; m.b = -1;
+                DwmExtendFrameIntoClientArea(h, ref m);             // black pixels then show the blurred backdrop
+            }
+        } catch { }
+    }
+}
+
+public class AcrylicRenderer : ToolStripProfessionalRenderer {
+    static readonly Color Hover = Color.FromArgb(64, 64, 64);
+    static readonly Color Line = Color.FromArgb(70, 70, 70);
+    public AcrylicRenderer() { RoundedEdges = false; }
+    protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e) {
+        e.Graphics.Clear(MenuStyle.Acrylic ? Color.Black : Color.FromArgb(32, 32, 32));
+    }
+    protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e) { }
+    protected override void OnRenderImageMargin(ToolStripRenderEventArgs e) { }
+    protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e) {
+        if (!e.Item.Selected || !e.Item.Enabled) return;
+        Rectangle r = new Rectangle(4, 2, e.Item.Width - 8, e.Item.Height - 4);
+        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        using (GraphicsPath gp = Round(r, 5)) using (SolidBrush b = new SolidBrush(Hover)) e.Graphics.FillPath(b, gp);
+    }
+    protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e) {
+        int y = e.Item.Height / 2;
+        using (Pen p = new Pen(Line)) e.Graphics.DrawLine(p, 10, y, e.Item.Width - 10, y);
+    }
+    protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e) {
+        e.TextColor = e.Item.Enabled ? Color.White : Color.FromArgb(120, 120, 120);
+        base.OnRenderItemText(e);
+    }
+    protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e) {
+        e.ArrowColor = e.Item.Enabled ? Color.White : Color.FromArgb(120, 120, 120);
+        base.OnRenderArrow(e);
+    }
+    protected override void OnRenderItemCheck(ToolStripItemImageRenderEventArgs e) {
+        Rectangle r = e.ImageRectangle;
+        float cx = r.Left + r.Width / 2f, cy = r.Top + r.Height / 2f;
+        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        using (Pen p = new Pen(Color.White, 1.6f)) {
+            e.Graphics.DrawLines(p, new PointF[] { new PointF(cx - 4, cy), new PointF(cx - 1.2f, cy + 3), new PointF(cx + 4.5f, cy - 3.5f) });
+        }
+    }
+    static GraphicsPath Round(Rectangle r, int radius) {
+        int d = radius * 2; GraphicsPath gp = new GraphicsPath();
+        gp.AddArc(r.X, r.Y, d, d, 180, 90); gp.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+        gp.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90); gp.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+        gp.CloseFigure(); return gp;
+    }
+}
+'@
+[System.Windows.Forms.ToolStripManager]::Renderer = New-Object AcrylicRenderer
+$script:menuFont = New-Object System.Drawing.Font('Segoe UI', 10)
+
 # ---------------- menu ----------------
 $menu = New-Object System.Windows.Forms.ContextMenuStrip
 function Add-Item([string]$text, [scriptblock]$onClick) {
@@ -166,7 +240,29 @@ $miSettings = Add-Item 'Settings...' { Show-Settings }
 $miStartup = Add-Item 'Start with Windows' { Set-Startup (-not (Get-Startup)); Update-Tray }
 [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
 $miExit = Add-Item 'Exit' { Exit-Tray }
-$script:notify.ContextMenuStrip = $menu
+
+# padding, font and the blur backdrop for the menu and its submenus
+function Style-Menu([System.Windows.Forms.ToolStripDropDown]$dd) {
+    $dd.Font = $script:menuFont
+    $dd.add_Opening({ param($s, $e) try { $null = $s.Handle; [MenuStyle]::Apply($s.Handle) } catch {} })
+    $dd.add_Opened({ param($s, $e) try { [MenuStyle]::Apply($s.Handle) } catch {} })
+    foreach ($it in @($dd.Items)) {
+        if ($it -is [System.Windows.Forms.ToolStripMenuItem]) {
+            $it.Padding = New-Object System.Windows.Forms.Padding(4, 5, 4, 5)
+            if ($it.HasDropDownItems) { Style-Menu $it.DropDown }
+        }
+    }
+}
+Style-Menu $menu
+
+# open the menu at the mouse pointer (left edge at the cursor; it flips up/left by itself if there is no room)
+function Show-TrayMenu {
+    try {
+        $null = $menu.Handle
+        [void][MenuStyle]::SetForegroundWindow($menu.Handle)
+        $menu.Show([System.Windows.Forms.Cursor]::Position)
+    } catch { Log-Tray "menu: $_" }
+}
 
 function Set-ReturnTo([string]$value) {
     $cfg = Load-Config
@@ -227,15 +323,10 @@ function Update-Tray {
     $miAll.Text  = 'All screens on' + $(if ($hk) { "$($hk)A" } else { '' })
 }
 
-# left click opens the same menu as right click
-$script:notify.add_MouseClick({
+# left and right click both open the menu at the pointer
+$script:notify.add_MouseUp({
     param($sender, $e)
-    if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
-        try {
-            $mi = [System.Windows.Forms.NotifyIcon].GetMethod('ShowContextMenu', [System.Reflection.BindingFlags]'Instance,NonPublic')
-            $mi.Invoke($script:notify, $null) | Out-Null
-        } catch { Log-Tray "menu: $_" }
-    }
+    if (($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) -or ($e.Button -eq [System.Windows.Forms.MouseButtons]::Right)) { Show-TrayMenu }
 })
 
 # ---------------- hotkeys (Ctrl+Alt+D / T / A) ----------------
