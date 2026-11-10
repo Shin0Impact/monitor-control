@@ -61,12 +61,7 @@ function Set-Mode([string]$m) { try { @{ mode = $m } | ConvertTo-Json | Set-Cont
 
 # ---------------- tray icon ----------------
 function New-ModeIcon([string]$mode) {
-    $color = switch ($mode) {
-        'desk' { [System.Drawing.Color]::FromArgb(59, 130, 246) }
-        'tv'   { [System.Drawing.Color]::FromArgb(249, 115, 22) }
-        'all'  { [System.Drawing.Color]::FromArgb(34, 197, 94) }
-        default { [System.Drawing.Color]::FromArgb(148, 163, 184) }
-    }
+    $color = [System.Drawing.Color]::White          # white icon; the letter (D / T / A) shows the mode
     $letter = switch ($mode) { 'desk' { 'D' } 'tv' { 'T' } 'all' { 'A' } default { '?' } }
     $bmp = New-Object System.Drawing.Bitmap 32, 32
     $g = [System.Drawing.Graphics]::FromImage($bmp)
@@ -131,79 +126,126 @@ function Set-Startup([bool]$on) {
     } catch { Log-Tray "startup setting failed: $_" }
 }
 
-# ---------------- Windows 11 style menu (dark, rounded, acrylic blur behind) ----------------
+# ---------------- Windows 11 style menu: frosted (blurred screen behind), rounded, follows light/dark ----------------
 Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing -TypeDefinition @'
 using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
 using System.Windows.Forms;
 using System.Runtime.InteropServices;
+using Microsoft.Win32;
 
-public static class MenuStyle {
-    [StructLayout(LayoutKind.Sequential)] struct AccentPolicy { public int AccentState; public int AccentFlags; public uint GradientColor; public int AnimationId; }
-    [StructLayout(LayoutKind.Sequential)] struct WinCompAttrData { public int Attribute; public IntPtr Data; public int SizeOfData; }
-    [DllImport("user32.dll")] static extern int SetWindowCompositionAttribute(IntPtr h, ref WinCompAttrData d);
+public static class MenuNative {
     [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr h, int attr, ref int val, int size);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
-    // acrylic blur behind (Windows 10 1803+); if it is refused the menu falls back to a plain dark one
-    public static bool Acrylic = Environment.OSVersion.Version.Build >= 17134;
-    const uint Tint = 0xC8202020;   // AABBGGRR: dark grey, ~78% opaque, so the blurred background shows through softly
-    public static void Apply(IntPtr h) {
+    public static void Round(IntPtr h) { try { int v = 2; DwmSetWindowAttribute(h, 33, ref v, 4); } catch (Exception) { } }   // Windows 11 rounded corners
+}
+
+public static class MenuTheme {
+    public static bool Light;
+    public static Color Frost, Fore, Muted, Hot, Line, Back;
+    public static void Refresh() {
+        Light = false;
         try {
-            int v = 1; DwmSetWindowAttribute(h, 20, ref v, 4);      // dark mode
-            v = 2;     DwmSetWindowAttribute(h, 33, ref v, 4);      // rounded corners
-            if (!Acrylic) return;
-            AccentPolicy ap = new AccentPolicy(); ap.AccentState = 4; ap.AccentFlags = 2; ap.GradientColor = Tint;
-            int size = Marshal.SizeOf(ap); IntPtr ptr = Marshal.AllocHGlobal(size);
-            try {
-                Marshal.StructureToPtr(ap, ptr, false);
-                WinCompAttrData d = new WinCompAttrData(); d.Attribute = 19; d.Data = ptr; d.SizeOfData = size;
-                if (SetWindowCompositionAttribute(h, ref d) == 0) Acrylic = false;
-            } finally { Marshal.FreeHGlobal(ptr); }
-        } catch { Acrylic = false; }
+            using (RegistryKey k = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", false)) {
+                if (k != null) { object v = k.GetValue("AppsUseLightTheme"); if (v is int) Light = ((int)v) != 0; }
+            }
+        } catch (Exception) { }
+        if (Light) {
+            Frost = Color.FromArgb(188, 243, 243, 245); Back = Color.FromArgb(249, 249, 249); Fore = Color.FromArgb(25, 25, 25);
+            Muted = Color.FromArgb(140, 140, 140); Hot = Color.FromArgb(40, 0, 0, 0); Line = Color.FromArgb(50, 0, 0, 0);
+        } else {
+            Frost = Color.FromArgb(180, 30, 30, 34); Back = Color.FromArgb(43, 43, 43); Fore = Color.FromArgb(240, 240, 240);
+            Muted = Color.FromArgb(125, 125, 125); Hot = Color.FromArgb(46, 255, 255, 255); Line = Color.FromArgb(60, 255, 255, 255);
+        }
     }
 }
 
-public class AcrylicRenderer : ToolStripProfessionalRenderer {
-    static readonly Color Hover = Color.FromArgb(64, 64, 64);
-    static readonly Color Line = Color.FromArgb(70, 70, 70);
-    public AcrylicRenderer() { RoundedEdges = false; }
+// The blurred picture of the screen behind the menu (taken just before it opens).
+public static class FrostBackdrop {
+    public static Bitmap Small;
+    public static Point Origin;
+    public const float Factor = 16f;
+    public static void Capture(Rectangle monitor) {
+        Release();
+        try {
+            using (Bitmap full = new Bitmap(monitor.Width, monitor.Height, PixelFormat.Format32bppRgb)) {
+                using (Graphics g = Graphics.FromImage(full)) g.CopyFromScreen(monitor.Location, Point.Empty, monitor.Size);
+                int w = Math.Max(2, (int)(monitor.Width / Factor)), h = Math.Max(2, (int)(monitor.Height / Factor));
+                Bitmap small = new Bitmap(w, h, PixelFormat.Format32bppRgb);
+                using (Graphics sg = Graphics.FromImage(small)) {
+                    sg.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                    sg.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                    sg.DrawImage(full, new Rectangle(0, 0, w, h), 0, 0, monitor.Width, monitor.Height, GraphicsUnit.Pixel);
+                }
+                Small = small; Origin = monitor.Location;
+            }
+        } catch (Exception) { Small = null; }
+    }
+    public static void Release() { if (Small != null) { Small.Dispose(); Small = null; } }
+}
+
+public class FrostColors : ProfessionalColorTable {
+    public override Color ToolStripDropDownBackground { get { return MenuTheme.Back; } }
+    public override Color ImageMarginGradientBegin { get { return MenuTheme.Back; } }
+    public override Color ImageMarginGradientMiddle { get { return MenuTheme.Back; } }
+    public override Color ImageMarginGradientEnd { get { return MenuTheme.Back; } }
+}
+
+public class FrostRenderer : ToolStripProfessionalRenderer {
+    public FrostRenderer() : base(new FrostColors()) { }
     protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e) {
-        e.Graphics.Clear(MenuStyle.Acrylic ? Color.Black : Color.FromArgb(32, 32, 32));
+        ToolStripDropDown dd = e.ToolStrip as ToolStripDropDown;
+        Graphics g = e.Graphics;
+        Rectangle r = new Rectangle(0, 0, e.ToolStrip.Width, e.ToolStrip.Height);
+        Bitmap small = FrostBackdrop.Small;
+        if (dd != null && small != null && dd.IsHandleCreated) {
+            Point sp = dd.PointToScreen(Point.Empty);
+            float k = FrostBackdrop.Factor;
+            using (ImageAttributes ia = new ImageAttributes()) {
+                ia.SetWrapMode(WrapMode.TileFlipXY);
+                g.InterpolationMode = InterpolationMode.HighQualityBilinear;
+                g.PixelOffsetMode = PixelOffsetMode.Half;
+                g.DrawImage(small, r, (sp.X - FrostBackdrop.Origin.X) / k, (sp.Y - FrostBackdrop.Origin.Y) / k, r.Width / k, r.Height / k, GraphicsUnit.Pixel, ia);
+            }
+            using (SolidBrush tint = new SolidBrush(MenuTheme.Frost)) g.FillRectangle(tint, r);
+        } else {
+            using (SolidBrush b = new SolidBrush(MenuTheme.Back)) g.FillRectangle(b, r);
+        }
     }
     protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e) { }
     protected override void OnRenderImageMargin(ToolStripRenderEventArgs e) { }
-    protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e) {
-        if (!e.Item.Selected || !e.Item.Enabled) return;
-        Rectangle r = new Rectangle(4, 2, e.Item.Width - 8, e.Item.Height - 4);
-        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        using (GraphicsPath gp = Round(r, 5)) using (SolidBrush b = new SolidBrush(Hover)) e.Graphics.FillPath(b, gp);
-    }
     protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e) {
         int y = e.Item.Height / 2;
-        using (Pen p = new Pen(Line)) e.Graphics.DrawLine(p, 10, y, e.Item.Width - 10, y);
+        using (Pen p = new Pen(MenuTheme.Line)) e.Graphics.DrawLine(p, 10, y, e.Item.Width - 10, y);
+    }
+    protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e) {
+        if (!e.Item.Enabled || (!e.Item.Selected && !e.Item.Pressed)) return;
+        Rectangle r = new Rectangle(4, 1, e.Item.Width - 8, e.Item.Height - 2);
+        SmoothingMode old = e.Graphics.SmoothingMode;
+        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        using (GraphicsPath gp = Round(r, 5)) using (SolidBrush b = new SolidBrush(MenuTheme.Hot)) e.Graphics.FillPath(b, gp);
+        e.Graphics.SmoothingMode = old;
     }
     protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e) {
-        Graphics g = e.Graphics;
-        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
-        Color c = e.Item.Enabled ? Color.White : Color.FromArgb(120, 120, 120);
-        using (StringFormat sf = new StringFormat(StringFormat.GenericTypographic)) {
-            sf.LineAlignment = StringAlignment.Center; sf.Alignment = StringAlignment.Near;
-            sf.FormatFlags |= StringFormatFlags.NoWrap; sf.HotkeyPrefix = System.Drawing.Text.HotkeyPrefix.None;
-            using (SolidBrush b = new SolidBrush(c)) g.DrawString(e.Text, e.TextFont, b, (RectangleF)e.TextRectangle, sf);
-        }
+        if (!e.Item.Enabled) e.TextColor = MenuTheme.Muted;
+        base.OnRenderItemText(e);
     }
     protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e) {
-        e.ArrowColor = e.Item.Enabled ? Color.White : Color.FromArgb(120, 120, 120);
+        e.ArrowColor = e.Item.Enabled ? MenuTheme.Fore : MenuTheme.Muted;
         base.OnRenderArrow(e);
     }
     protected override void OnRenderItemCheck(ToolStripItemImageRenderEventArgs e) {
         Rectangle r = e.ImageRectangle;
-        float cx = r.Left + r.Width / 2f, cy = r.Top + r.Height / 2f;
+        int cx = r.X + r.Width / 2, cy = r.Y + r.Height / 2;
+        SmoothingMode old = e.Graphics.SmoothingMode;
         e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        using (Pen p = new Pen(Color.White, 1.6f)) {
-            e.Graphics.DrawLines(p, new PointF[] { new PointF(cx - 4, cy), new PointF(cx - 1.2f, cy + 3), new PointF(cx + 4.5f, cy - 3.5f) });
+        using (Pen p = new Pen(MenuTheme.Fore, 1.8f)) {
+            p.StartCap = LineCap.Round; p.EndCap = LineCap.Round; p.LineJoin = LineJoin.Round;
+            e.Graphics.DrawLines(p, new PointF[] { new PointF(cx - 4.5f, cy + 0.5f), new PointF(cx - 1.5f, cy + 3.5f), new PointF(cx + 4.5f, cy - 3.5f) });
         }
+        e.Graphics.SmoothingMode = old;
     }
     static GraphicsPath Round(Rectangle r, int radius) {
         int d = radius * 2; GraphicsPath gp = new GraphicsPath();
@@ -213,7 +255,8 @@ public class AcrylicRenderer : ToolStripProfessionalRenderer {
     }
 }
 '@
-[System.Windows.Forms.ToolStripManager]::Renderer = New-Object AcrylicRenderer
+[MenuTheme]::Refresh()
+[System.Windows.Forms.ToolStripManager]::Renderer = New-Object FrostRenderer
 $script:menuFont = New-Object System.Drawing.Font('Segoe UI', 10)
 
 # ---------------- menu ----------------
@@ -255,11 +298,10 @@ $miStartup = Add-Item 'Start with Windows' { Set-Startup (-not (Get-Startup)); U
 [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
 $miExit = Add-Item 'Exit' { Exit-Tray }
 
-# padding, font and the blur backdrop for the menu and its submenus
+# padding, font and rounded corners for the menu and its submenus
 function Style-Menu([System.Windows.Forms.ToolStripDropDown]$dd) {
     $dd.Font = $script:menuFont
-    $dd.add_Opening({ param($s, $e) try { $null = $s.Handle; [MenuStyle]::Apply($s.Handle) } catch {} })
-    $dd.add_Opened({ param($s, $e) try { [MenuStyle]::Apply($s.Handle) } catch {} })
+    $dd.add_Opened({ param($s, $e) try { [MenuNative]::Round($s.Handle) } catch {} })
     foreach ($it in @($dd.Items)) {
         if ($it -is [System.Windows.Forms.ToolStripMenuItem]) {
             $it.Padding = New-Object System.Windows.Forms.Padding(4, 5, 4, 5)
@@ -267,25 +309,35 @@ function Style-Menu([System.Windows.Forms.ToolStripDropDown]$dd) {
         }
     }
 }
+function Apply-MenuColors($items, $fg) {
+    foreach ($it in @($items)) {
+        $it.BackColor = [System.Drawing.Color]::Transparent
+        $it.ForeColor = $fg
+        if (($it -is [System.Windows.Forms.ToolStripMenuItem]) -and $it.HasDropDownItems) { Apply-MenuColors $it.DropDownItems $fg }
+    }
+}
 Style-Menu $menu
+$menu.add_Closed({ [FrostBackdrop]::Release() })
 
-# open the menu at the mouse pointer (left edge at the cursor; it flips up/left by itself if there is no room)
+# The menu opens with its left edge at the pointer, growing to the right and upward from the taskbar.
+# It only slides left as far as needed to stay on screen.
 function Show-TrayMenu {
     try {
-        $null = $menu.Handle
-        [void][MenuStyle]::SetForegroundWindow($menu.Handle)
+        [MenuTheme]::Refresh()
+        $fg = [MenuTheme]::Fore
+        $menu.ForeColor = $fg
+        Apply-MenuColors $menu.Items $fg
         $pt = [System.Windows.Forms.Cursor]::Position
-        $menu.Show($pt)
-        # left edge at the pointer; if the pointer is on the taskbar (or there is no room below), sit above it
-        $wa = [System.Windows.Forms.Screen]::FromPoint($pt).WorkingArea
-        $w = $menu.Width; $h = $menu.Height
-        $x = $pt.X; $y = $pt.Y
-        if ($y -ge $wa.Bottom) { $y = $wa.Bottom - $h - 8 }
-        elseif (($y + $h) -gt $wa.Bottom) { $y = $y - $h }
-        if (($x + $w) -gt $wa.Right) { $x = $wa.Right - $w - 8 }
-        if ($x -lt $wa.Left) { $x = $wa.Left }
-        if ($y -lt $wa.Top) { $y = $wa.Top }
-        $menu.Location = New-Object System.Drawing.Point($x, $y)
+        $scr = [System.Windows.Forms.Screen]::FromPoint($pt)
+        $wa = $scr.WorkingArea
+        $sz = $menu.GetPreferredSize([System.Drawing.Size]::Empty)
+        $x = [Math]::Max($wa.Left, [Math]::Min($pt.X, $wa.Right - $sz.Width))
+        $bottom = [Math]::Min($pt.Y, $wa.Bottom)
+        $y = [Math]::Max($wa.Top, $bottom - $sz.Height)
+        [FrostBackdrop]::Capture($scr.Bounds)          # before the menu covers the screen
+        $null = $menu.Handle
+        [void][MenuNative]::SetForegroundWindow($menu.Handle)   # so the menu closes when you click elsewhere
+        $menu.Show((New-Object System.Drawing.Point($x, $y)))
     } catch { Log-Tray "menu: $_" }
 }
 
