@@ -4,6 +4,14 @@ A small Windows tray app that switches a PC between **desktop mode** (your monit
 
 Built for a PC with an NVIDIA GPU driving two monitors and an Android TV, but nothing is hard-coded to those screens: you pick what each screen is in the Settings window.
 
+## At a glance
+
+| | |
+|---|---|
+| **What** | Windows tray app that switches a PC between desktop, TV and all-screens modes and looks after the TV itself |
+| **Stack** | PowerShell 5.1 and VBScript tray app; NirSoft MultiMonitorTool for display control; ADB and Wake-on-LAN for the Android TV |
+| **Config** | Settings window and `config.json`: nothing is hard-coded to a particular set of screens |
+
 ## What it does
 
 | | |
